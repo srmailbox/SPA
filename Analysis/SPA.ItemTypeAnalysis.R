@@ -1,14 +1,22 @@
 ###############
-# SPA Project - SPA test item analysis
+# SPA Project - SPA test item analysis - Item types
 #
-# Created: 2024-10-07
+# In the first pass at creating a screener, I focused on a screener that would
+# identify "overall" at risk kids. This led to poor performance on Item subtypes
+# e.g., kids who were poor at Nonwords, but not other word types. 
+# (SPA.ItemAnalysis.R)
+#
+# In this version, I develop screeners for each item type (Irregs, Regs, NW)
+# and then aggregate these into overall screeners.
+#
+# Created: 2025-05-15
 # Changelog:
-# 2025-05-14: Use 20th percentile instead of 16th.
 
 # 0. Set up ####
-include(CTT)
-include(psych)
+# include(CTT)
+# include(psych)
 include(zoo)
+include(quantreg)
 
 if(!exists("spaAcc")) source("Analysis/SPA.DataImport.R")
 
@@ -18,572 +26,214 @@ if(!exists("spaAcc")) source("Analysis/SPA.DataImport.R")
 
 spaAll = t(spaAcc %>% select(-ItemType, -Stimulus)) %>% 
   data.frame %>% 
-  mutate(across(everything(), as.numeric))
-colnames(spaAll) = spaAcc$Stimulus
+  mutate(across(everything(), as.numeric)
+         , score = rowSums(.)
+         , score_logis = qlogis((score+1)/89)
+         , newID = rownames(.)
+  )%>% 
+  merge(pptDetails %>% 
+          select(newID, sp_age) %>% 
+          mutate(sp_age = as.numeric(sp_age)
+                 , ageCat = cut(sp_age, breaks=c(0,89, 101, 113, 125, 150)
+                                , labels=c("<= 7;5", paste0("<= ",8:10,";",5), "10;6+"))
+          )
+  )
+colnames(spaAll)[2:88] = spaAcc$Stimulus
+
+# Limit to kids between 6;5 and 12;0
+spaAnalysis = spaAll %>% filter(sp_age < 200, sp_age >=78)
 
 ## 1.2 items by type ####
-spaItemTypes = by(spaAcc, spaAcc$ItemType
-                  , function(x) {
-                    temp = t(x %>% select(-ItemType, -Stimulus)) %>% 
-                      data.frame %>% mutate(across(everything(), as.numeric))
-                    colnames(temp) = x$Stimulus
-                    return(temp)
-                  }
-)
+spaItemTypes = 
+  list(Irregs = spaAnalysis[,c(1, 2:30, 89:92)]
+       , Regs = spaAnalysis[,c(1, 2:30+29, 89:92)]
+       , NWs = spaAnalysis[,c(1, 2:30+58, 89:92)]
+  ) %>% 
+  lapply(function(x) {
+    x %>% 
+      mutate(subscale_score = rowSums(across(all_of(2:30)))
+             , subscale_logis = qlogis((subscale_score+1)/31)
+             )
+  })
+
+# 769 kids
+
+## 1.3 QR analysis to identify 20th percentiles ####
+spaItemTypes.qr.2 = lapply(spaItemTypes
+       , function(x) {
+         mod = rq(subscale_logis~sp_age, x, tau=.20)
+         x$qr_irr.fit = 29*plogis(predict(mod))
+         x$sub20p = ifelse(x$subscale_score < x$qr_irr.fit, 1, 0)
+         list(qr = mod, data=x)
+         })
 
 
-# # 2.0 Classical Item Analysis ####
-# 
-# ## 2.1 Full Set of Items ####
-# 
-# spaAll.ctt = itemAnalysis(spaAll)
-# 
-# 
-# ## 2.2 Item Type ####
-# 
-# spaCTT = lapply(spaItemTypes, itemAnalysis)
-# 
-# 
-# ### That's all fine, but it's not that informative since we are much more
-# # concerned with items that discriminate at the lower end of the distribution
-# 
-# # 3.0 IRT ####
-# 
-# ## 3.1 Full Set of Items ####
-# 
-spaAll.irt = irt.fa(spaAll)
-# 
-# spaAll.f3 = irt.fa(spaAll, 3, plot=F)
-# # I don't love how these are falling out
-# 
-# ## 3.2 Item Type ####
-# 
-# spaIRT = lapply(spaItemTypes, irt.fa, plot=F)
-# 
-# par(mfrow=c(2,2))
-# spaIRT$Irreg %>% plot(main="Irr")
-# spaIRT$Reg %>% plot(main="Reg")
-# spaIRT$NW %>% plot(main="NW")
-# spaAll.irt %>% plot(main="All")
-# par(mfrow=c(1,1))
-# 
-### 3.2.1 IRT by Item Type vs All together ####
-# 
-# # How well do the Information matrices from the overall analysis match up
-# # with the analysis by each item type. (e.g., can we just use the overall
-# # IRT to identify useful items, or do we need to consider each itemType 
-# # separately)
-# spaIIC = 
-#   merge(
-#     lapply(spaIRT
-#            , function(x) plot(x)$sumInfo[[1]] %>% data.frame) %>% 
-#       bind_rows(.id="Type") %>% 
-#       mutate(Item = rownames(.))
-#     , plot(spaAll.irt)$sumInfo[[1]] %>% data.frame %>% mutate(Item=rownames(.))
-#     , by="Item"
-#     , suffixes=c(".byType", ".All")
-#   )
-# 
-# cor(spaIIC %>% select(ends_with(".byType"))
-#     , spaIIC %>% select(ends_with(".All"))) %>% diag
-# 
-## Huh! Turns out the overall analysis does really well, so we can maybe take
-# an easier approach here.
+# 2. Using tetrachoric cors to identify item lists ####
 
-# Let's add the kids' ability to their data.
-itemCols = colnames(spaAll)
-spaAll$ability =
-  factor.scores(spaAll, spaAll.irt$fa)$scores
-spaResults = merge(spaAll %>% mutate(newID = rownames(.)
-                                     , across(all_of(itemCols), ~ifelse(is.na(.), 0, .)))
-                   , pptDetails %>% select(newID, starts_with("sp_")) %>%
-                     # rename(newID = Child_ID, sp_age=sp.age) %>%
-                     mutate(across(starts_with("sp_"), as.numeric))
-                   , by = "newID") %>%
-  # rowwise() %>%
-  mutate(sp_alt = rowSums(select(., all_of(itemCols)))
-         , sp_irr_alt = rowSums(select(., all_of(itemCols[1:29])))
-         , sp_reg_alt = rowSums(select(., all_of(itemCols[1:29+29])))
-         , sp_nw_alt = rowSums(select(., all_of(itemCols[1:29+58])))
-         )
-#   
-# 
-# plot(spaResults$sp_age, spaResults$ability)
-# # plot(spaResults$nst_total, spaResults$ability)
-# # plot(spaResults$sp_age, spaResults$nst_total)
-# ### The problem here is that by lumping everyone together, we assume they should
-# # have similar abilities. But younger kids have lower abilities, as expected.
-# 
-# # 4.0 Adjusting for Age ####
-# # Ok, so the only issue here is that ability is correlated with age in a way
-# # that will undermine our results.
-# 
-# # I think we want to redo this with the following logic:
-# # 1. filter out kids under 78 months (6.5yrs) because the really young kids
-# #    just can't be evaluated with the same items as the 12 year olds
-# # 2. Apply a full IRT model to determine a general ability score.
-# # 3. Adjust the ability score for age in months with regression, to get 
-# #    an age-corrected ability (standardized residuals)
-# # 4. "predict" the performance on each item for abilities of -2, -1.5,..., +2
-# #     based on the IRT model
-# # 5. Calculate information based on the IRT model
-# 
-# # Then we can use this to determine a set of items that have high entropy for
-# # each level of age-corrected ability.
-# 
-## 4.1 Age Filter ####
-# Filtering kids under 6.5 yrs old, and removing a single outlier 18 yr old.
-spa7plus = spaResults %>% filter(sp_age>=78, sp_age < 200)
+spa.tetrachoric = function(x) {
+  itemCols = 2:30
+  byAge = by(x$data, INDICES=x$data$ageCat
+                           , function(y) cor(y %>% select(itemCols), y$sub20p) %>% data.frame %>% 
+                             rename(cor = ".") %>% arrange(cor)
+                           , simplify = F)
+  list(data=x$data, qr=x$qr, itemCors = byAge)
+  
+}
 
-# # Leaves us with 770 kids
-# 
-# ## 4.2 IRT on the restricted set to get abilities ####
-spa7.irt = irt.fa(spa7plus[,itemCols])
-# spa7plus$ability = factor.scores(spa7plus[,itemCols], spa7.irt$fa)$scores
-# 
-# ## 4.3 Age adjusted abilities ####
-# spa7plus$ability.age= rstandard(lm(ability~sp_age, spa7plus))
-# 
-# # ggplot(spa7plus, aes(x=sp_age, y=ability))+
-# #   theme_minimal()+
-# #   geom_point(aes(y=ability.age), col="red", alpha=.5)+
-# #   geom_smooth(aes(y=ability.age), col="red")
-# # 
-# # ggplot(spa7plus, aes(x=sp_age, y=ability))+
-# #   theme_minimal()+
-# #   geom_point(col="grey")+
-# #   geom_smooth(col="grey")
-# 
-# ## 4.4 logistic regression for each item against ability ####
-# # spa7.ability.glm = 
-# #   apply(spa7plus[,itemCols], 2
-# #         , FUN=function(x) 
-# #           glm(acc~ability, data=data.frame(acc=x, ability=spa7plus$ability.age)
-# #               , family=binomial))
-# 
-# ## 4.4 "predict" the performance on each item for abilities of -2, -1.5,..., +2 ###
-# spa7items.pred = spa7plus %>% slice(1:length(seq(-2,2,.25))) %>% 
-#   select(all_of(itemCols))
-# abilities = seq(-2,2,.25)
-# 
-# for(i in itemCols) {
-#   spa7items.pred[,i] =
-#   1/(
-#     1+
-#       exp(-1.7*spa7.irt$irt$discrimination[i,]*
-#             (abilities - spa7.irt$irt$difficulty[[1]][i])
-#       )
-#   )
-# }
-# 
-# 
-# ## 4.5 calculate "info" from entropy ####
-# spa7items.info = 
-#   lapply(spa7items.pred
-#          , function(x) -x*log(x)-(1-x)*log(1-x)) %>% 
-#   bind_cols() %>% t() %>% data.frame %>% 
-#   mutate(Type=gl(3,29,labels=c("Irr", "Reg", "NW")))
-# 
-# colnames(spa7items.info)=c(gsub("p-", "n", paste0("p",seq(-2,2,.25))), "Type")
-# # colnames(spa7items.info)[9]="n0"
-# 
-# ## 4.6 Item Informativeness ####
-# 
-# info.n.5 = spa7items.info %>% select(n0.5, Type) %>% rename(Info = n0.5) %>% 
-#   arrange(desc(Info)) %>%
-#   mutate(items = factor(rownames(.), levels=rownames(.)[order(-Info)])) %>% 
-#   ggplot(aes(x=items, y=Info, fill=Type))+
-#   geom_col()+
-#   theme_minimal()+
-#   theme(axis.text.x = element_text(angle = 90, vjust = .5, hjust=1))+
-#   ggtitle("How informative is each item around ability = -.5 SD?") +
-#   ylab("Information")+xlab(NULL)
-# 
-# info.n1 = spa7items.info %>% select(n1, Type) %>% rename(Info = n1) %>% 
-#   arrange(desc(Info)) %>%
-#   mutate(items = factor(rownames(.), levels=rownames(.)[order(-Info)])) %>% 
-#   ggplot(aes(x=items, y=Info, fill=Type))+
-#   geom_col()+
-#   theme_minimal()+
-#   theme(axis.text.x = element_text(angle = 90, vjust = .5, hjust=1))+
-#   ggtitle("How informative is each item around ability = -1 SD?") +
-#   ylab("Information")+xlab(NULL)
-# 
-# 
-# gridExtra::grid.arrange(
-#   info.n.5, info.n1
-# )
-# ### This just doesn't work
+spaItemTypes.qr.2 = lapply(spaItemTypes.qr.2, spa.tetrachoric)
 
+## 2.1 Cumulative scores and thresholds ####
+spa.detection.age = function(x) {
+  # screeners = vector("list", length(names(x$itemCors)))
+  # names(screeners)=names(x$itemCors)
+  screeners = lapply(x$itemCors, function(x) x)
+  for(age in names(x$itemCors)) {
+    dat = x$data %>% filter(ageCat == age)
+    screeners[[age]] = data.frame(screeners[[age]], matrix(NA, 29, 30))
+    colnames(screeners[[age]])[-1]=paste0("l", 0:29)
+    for(sclLength in 1:29) {
+      itms = rownames(screeners[[age]])[1:sclLength]
+      itmsDat = dat %>% select(all_of(itms), sub20p) %>% 
+        mutate(score = rowSums(across(all_of(itms))))
+      for(thrsh in 1:sclLength-1)
+        screeners[[age]][sclLength,thrsh+2] = itmsDat %>% 
+          filter(sub20p==1,score<=thrsh) %>% nrow
+    }
+      minItems = sum(rowMaxes(screeners[[age]], na.rm=T)<=max(screeners[[age]], na.rm=T)-1)+1
+      screeners[[age]] = list(
+        itemCors = screeners[[age]]
+        , length = minItems
+        , items = rownames(screeners[[age]])[1:minItems]
+      )
+    
+  }
+  
+  # This structure is terrible. I really want the screeners to go in the age
+  # summaries.
+  list(data=x$data, qr=x$qr, screeners = screeners)
+}
 
-# 5.0 Item Performance by Age ####
+spaItemTypesScreeners = lapply(spaItemTypes.qr.2, spa.detection.age)
 
-spa7.item.glm = 
-  apply(spa7plus[,itemCols], 2
-        , function(x) {
-          mod = glm(Acc~scale(sp_age), data=data.frame(Acc=x, sp_age=spa7plus$sp_age)
-              , family=binomial)
-          list(glm=mod, performance = data.frame(P = predict(mod, data.frame(sp_age=78:144), type="response")
-                     , sp_age=78:144)
-               , p50age = data.frame(p50=-coef(mod)[1]/coef(mod)[2]))
-        })
+spaScreenerItems = lapply(spaItemTypesScreeners, 
+       function(x) lapply(x$screeners, function(y) y$items))
 
-p50s = lapply(spa7.item.glm, function(x) x$p50age) %>% bind_rows(.id="item")
-rownames(p50s)=NULL
-
-ageICC = data.frame(
-  lapply(spa7.item.glm, function(x) x$performance[,1]) %>% bind_cols()
-  , age=78:144
+itmsByAge = vector("list", length(levels(spaItemTypes$Irregs$ageCat)))
+names(itmsByAge) = levels(spaItemTypes$Irregs$ageCat)
+for (age in names(itmsByAge)) {
+  itmsByAge[[age]] = c(
+    spaScreenerItems$Irregs[[age]], spaScreenerItems$Regs[[age]]
+    , spaScreenerItems$NWs[[age]]
   )
+}
 
-ageICC %>% 
-  pivot_longer(-age, names_to="item", values_to="pCorrect") %>% 
-  ggplot(aes(x=age, y=pCorrect, group=item))+
-  geom_line()+
-  theme_minimal()+
-  theme(panel.grid.major.x = element_blank()
-        , panel.grid.minor.x = element_blank()
-        )
+# 3.0 assess item type derived screeners against "total" ####
 
-itemCoefs = lapply(spa7.item.glm, function(x) coef(x$glm)) %>% 
-  bind_rows(.id="item") %>% 
-  rename(intrcpt="(Intercept)", age="scale(sp_age)") %>%  
-  arrange(age) %>% 
-  # filter(intrcpt<0) %>% 
-  data.frame
+# ok, so to check how our "subscreeners" do against the overall scores, first
+# need to identify "poor" overall qr scores.
 
-low15slopes = itemCoefs %>% arrange(age) %>% slice(1:15) %>% select(item)
-
-ageICC.shallowSlope=ageICC %>% 
-  pivot_longer(-age, names_to="item", values_to="pCorrect") %>% 
-  filter(item %in% low15slopes$item)
-
-ggplot(ageICC.shallowSlope, aes(x=age, y=pCorrect, group=item, label=item))+
-  geom_line()+
-  geom_label(data=ageICC.shallowSlope %>% group_by(item) %>% sample_n(1)
-             , alpha = .8)+
-  theme_minimal()+
-  theme(panel.grid.major.x = element_blank()
-        , panel.grid.minor.x = element_blank()
-  )
-
-
-mostAverage = itemCoefs %>% arrange(intrcpt^2) %>% slice(1:15) %>% select(item)
-
-ageICC.average=ageICC %>% 
-  pivot_longer(-age, names_to="item", values_to="pCorrect") %>% 
-  filter(item %in% mostAverage$item)
-
-ggplot(ageICC.average, aes(x=age, y=pCorrect, group=item, label=item))+
-  geom_line()+
-  geom_label(data=ageICC.average %>% group_by(item) %>% sample_n(1)
-             , alpha = .8)+
-  theme_minimal()+
-  theme(panel.grid.major.x = element_blank()
-        , panel.grid.minor.x = element_blank()
-  )
-
-
-# 6.0 Item Performance by Ability (unadj) ####
-
-spa7.ability.glm = 
-  apply(spa7plus[,itemCols], 2
-        , function(x) {
-          mod = glm(Acc~ability
-                    , data=data.frame(
-                      Acc=x, ability=as.vector(spa7plus$ability)
-                    )
-                    , family=binomial)
-          list(glm=mod
-               , performance = 
-                 data.frame(
-                   P = predict(mod
-                               , data.frame(
-                                 ability=seq(min(spa7plus$ability)
-                                             , max(spa7plus$ability)
-                                             , length.out=100))
-                               , type="response")
-                   , ability=seq(
-                     min(spa7plus$ability), max(spa7plus$ability)
-                     , length.out=100)
-                   )
-               , p50ability = data.frame(p50=-coef(mod)[1]/coef(mod)[2]))
-        })
-
-p50s.ability = lapply(spa7.ability.glm, function(x) x$p50ability) %>% bind_rows(.id="item")
-rownames(p50s.ability)=NULL
-
-ageICC.ability = data.frame(
-  lapply(spa7.ability.glm, function(x) x$performance[,1]) %>% bind_cols()
-  , abilities = seq(
-    min(spa7plus$ability), max(spa7plus$ability)
-    , length.out=100)
-)
-
-ageICC.ability %>% 
-  pivot_longer(-abilities, names_to="item", values_to="pCorrect") %>% 
-  ggplot(aes(x=abilities, y=pCorrect, group=item))+
-  geom_line()+
-  theme_minimal()+
-  theme(panel.grid.major.x = element_blank()
-        , panel.grid.minor.x = element_blank()
-  )
-
-itemCoefs = lapply(spa7.ability.glm, function(x) coef(x$glm)) %>% 
-  bind_rows(.id="item") %>% 
-  rename(intrcpt="(Intercept)") %>%  
-  arrange(ability) %>% 
-  # filter(intrcpt<0) %>% 
-  data.frame
-
-low15slopes = itemCoefs %>% arrange(ability) %>% slice(1:15) %>% select(item)
-
-ageICC.shallowSlope=ageICC.ability %>% 
-  pivot_longer(-abilities, names_to="item", values_to="pCorrect") %>% 
-  filter(item %in% low15slopes$item)
-
-ggplot(ageICC.shallowSlope, aes(x=abilities, y=pCorrect, group=item, label=item))+
-  geom_line()+
-  geom_label(data=ageICC.shallowSlope %>% group_by(item) %>% sample_n(1)
-             , alpha = .8)+
-  theme_minimal()+
-  theme(panel.grid.major.x = element_blank()
-        , panel.grid.minor.x = element_blank()
-  )
-
-
-mostAverage = itemCoefs %>% arrange(intrcpt^2) %>% slice(1:15)
-
-ageICC.average=ageICC.ability %>% 
-  pivot_longer(-abilities, names_to="item", values_to="pCorrect") %>% 
-  filter(item %in% mostAverage$item)
-
-ggplot(ageICC.average, aes(x=abilities, y=pCorrect, group=item, label=item))+
-  geom_line()+
-  geom_label(data=ageICC.average %>% group_by(item) %>% sample_n(1)
-             , alpha = .8)+
-  theme_minimal()+
-  theme(panel.grid.major.x = element_blank()
-        , panel.grid.minor.x = element_blank()
-  )
-
-geoMean = itemCoefs %>% arrange(sqrt(abs(intrcpt)*abs(ability))) %>% slice(1:15)
-
-ageICC.geo=ageICC.ability %>% 
-  pivot_longer(-abilities, names_to="item", values_to="pCorrect") %>% 
-  filter(item %in% geoMean$item)
-
-ggplot(ageICC.geo, aes(x=abilities, y=pCorrect, group=item, label=item))+
-  geom_line()+
-  geom_label(data=ageICC.geo %>% group_by(item) %>% sample_n(1)
-             , alpha = .8)+
-  theme_minimal()+
-  theme(
-    # panel.grid.major.x = element_blank()
-        , panel.grid.minor.x = element_blank()
-  )
-
-# 7.0 What if we do just use the IRT Results ####
-
-itemCharacteristics = data.frame(plot(spa7.irt)$sumInfo %>% data.frame
-           , Diff= spa7.irt$irt$difficulty[[1]]
-           , Disc = as.vector(spa7.irt$irt$discrimination))
-
-midDiffItems =itemCharacteristics %>% arrange(Diff) %>% slice(34:53) %>% rownames()
-
-spaMidDiff = spa7plus[, c(midDiffItems, "sp_age")]
-spaMidDiff$Score = rowSums(spaMidDiff %>% select(-sp_age))
-spaMidDiff$logisScore = qlogis((spaMidDiff$Score+1)/22)
-
-## 7.1 Quant Reg ####
-
-include(quantreg)
-spaMidDiff.qr = rq(logisScore~sp_age, data=spaMidDiff, tau=c(.1,.2, .3, .4))
-
-spaMidDiff.qrpred = data.frame(age=78:144
-                               ,  plogis(predict(spaMidDiff.qr
-                                                 , data.frame(sp_age = 78:144))
-                                         )
-)
-
-
-spaMidDiff.qrpred %>% pivot_longer(-age, values_to="P", names_to="tau") %>% 
-  mutate(tau = gsub("tau..", "", tau)) %>% 
-  ggplot(aes(x=age, y=P*20, color = tau))+
-  geom_line()+
-  theme_minimal()+
-  labs(x="Age in Months", y="Items correct of 20")
-
-# Looks like that does an ok job. even poorer young spellers can spell a bunch
-# and poorer older readers are not at ceiling.
-
-## 7.2 QR for IDing "20th percentile" ####
-
-# ggplot(spa7plus, aes(x=sp_alt, y=ability, col=sp_age))+geom_point()
-spa7plus$sp_logit = qlogis((spa7plus$sp_alt+1)/89) 
-spa7.qr = rq(sp_logit~sp_age, spa7plus, tau=.20)
-
-spa7plus$qr.fit = 87*plogis(predict(spa7.qr))
+spaAnalysis.qr.2 = rq(score_logis ~ sp_age, spaAnalysis, tau=.2)
+spaAnalysis$qr.fit = 87*plogis(predict(spaAnalysis.qr.2))
+spaAnalysis$sub20p = ifelse(spaAnalysis$qr.fit>spaAnalysis$score, 1, 0)
 
 qrMod = data.frame(sp_age=78:144) %>% 
-  mutate(sp_alt=87*plogis(predict(spa7.qr, data.frame(sp_age = 78:144))))
+  mutate(score=87*plogis(predict(spaAnalysis.qr.2, data.frame(sp_age = 78:144))))
 
-ggplot(spa7plus, aes(x=sp_age, y=sp_alt))+
-  geom_point(col="darkgrey")+
+ggplot(spaAnalysis, aes(x=sp_age, y=score, colour=sub20p))+
+  geom_point(alpha=.5)+
   # geom_smooth()+
-  geom_line(data=qrMod, aes(colour=NULL), linewidth=1, col="blue")+
+  geom_line(data=qrMod, aes(x=sp_age, colour=NULL), size=1, col="darkred")+
   theme_minimal()+
   labs(x="Age in months", y="Score (of 87)"
        , title="20th Percentile Performance", subtitle="as a function of age")
 
-# So, let's flag the poorest 20% of SPA spellers (age adjusted)
+for(age in names(itmsByAge)){
+  spaAnalysis$screener.score[spaAnalysis$ageCat==age] = 
+    rowSums(spaAnalysis[spaAnalysis$ageCat==age, itmsByAge[[age]]])
+}
 
-spa7plus = spa7plus %>% 
-  mutate(sub20p = ifelse(sp_alt < qr.fit, 1, 0))
-# table(spa7plus$sub20p)/nrow(spa7plus)
+table(spaAnalysis$screener.score, spaAnalysis$ageCat, spaAnalysis$sub20p)[,,2]
+# so for each subscale, we can apply a threshold as follows:
+# 7;5: 6/9 (15/80 false alarms, 18.8%)
+# 8;5: 4/7 (19/134 false alarms, 14.2%)
+# 9;5: 9/13 (14/120 false alarms, 11.7%)
+# 10;5: 13/16 (32/136 false alarms, 23.5%)
+# 11;0: 15/18 (56/144 false alarms, 38.9%... oof.)
 
-## 7.3 Calculate MidItems score ####
+# Perhaps we can add some items and get a better discrimination for the
+# for the total scores.
 
-spa7plus = spa7plus %>% 
-  mutate(screener = rowSums(select(., all_of(midDiffItems)))
-         , ageCat = cut(sp_age, breaks=c(0,89, 101, 113, 125, 150)
-                        , labels=c("<= 7;5", paste0("<= ",8:10,";",5), "10;6+")))
+## 3.1 Additional items for "total" ####
 
-## 7.4 Assess performance of screeners ####
+# For each age group, take the items that are not in the screener yet
+# and choose the ones that correlate strongest with the "20th percentile"
 
-### 7.4.1 Overall, ignoring ages ####
-nSub20 = sum(spa7plus$sub20p)
-spa7roc.overall = spa7plus %>% 
-  arrange(screener) %>% 
-  mutate(detection = cumsum(sub20p)/nSub20) %>% 
-  group_by(screener) %>% 
-  summarise(detection = max(detection))
-spa7roc.overall
-
-ggplot(spa7roc.overall, aes(x=screener, y=detection))+
-  geom_line(col="red")+
-  ylab("Detect sub 20th percentile") + xlab("Screener threshold")+
-  theme_minimal()
-
-# Would need to apply a rule of 18 or less to catch 100% of sub20ps
-
-### 7.4.2 Thresholds by Age ####
-spa7detection.age = spa7plus %>% 
-  group_by(ageCat, screener) %>% 
-  summarise(detection=sum(sub20p)) %>% #slice(1:20) %>% data.frame()
-  # ungroup(screener) %>% 
-  mutate(detection=cumsum(detection)/sum(detection)) %>% 
-  ungroup() %>% 
-  arrange(ageCat, screener)
-
-ggplot(spa7detection.age, aes(x=screener, y=detection, col=ageCat))+
-  geom_line()+
-  labs(title = "Screener's rate of detecting Full SPA 20th percentile kids"
-       , subtitle = "by ages and threshold score (using IRT)"
-       , colour = "Age Group"
-       , x = "Screener threshold"
-       , y = "Detect sub 20th percentile") +
-  theme_minimal()+
-  scale_x_continuous(breaks = 0:20)+
-  scale_y_continuous(minor_breaks = 0:20/20)+
-  theme(panel.grid.minor.x=element_blank())
-
-### Ok, so with this we could apply different thresholds:
-# sub 7;5: 8 or less indicates follow up
-# 7;6 - 8;5: 9 or less
-# 8;6 - 9;5: 10 or less
-# 9;5 - 10;5: 12 or less
-# 10;6 plus: 18 or less
-thrshHlds = c(8,9,10,12,18)
-# False positive rate
-spa7fpr.age = spa7plus %>% 
-  group_by(ageCat, screener) %>%
-  filter(!sub20p) %>% 
-  summarise(n = n()) %>% #slice(1:20) %>% data.frame()
-  # ungroup(screener) %>%
-  mutate(fpr=cumsum(n)) %>% 
-  mutate(fpr=fpr/max(fpr)) %>% 
-  ungroup() %>% 
-  arrange(ageCat, screener)
-
-ggplot(spa7fpr.age, aes(x=screener, y=fpr, col=ageCat))+
-  geom_vline(data=data.frame(ageCat = levels(spa7plus$ageCat)
-                             , threshold = thrshHlds)
-             , mapping=aes(xintercept=threshold, col=ageCat)
-             , size=.25, linetype="dashed")+
-  geom_line()+
-  labs(title = "False Positive Rate (Overdiagnosis)"
-       , subtitle = "by ages and threshold score"
-       , colour = "Age Group"
-       , x = "Screener threshold"
-       , y = "FPR") +
-  theme_minimal()+
-  scale_x_continuous(breaks = 0:length(midDiffItems))+
-  scale_y_continuous(minor_breaks = 0:length(midDiffItems)/length(midDiffItems))+
-  theme(panel.grid.minor.x=element_blank())
-
-## the false positive rates are pretty high, especially for the youngest and
-# oldest kids. Not too bad in the mid-range.
-# age <= 7;5: 35% false positives
-# - 8;5: 19.4%
-# - 9;5: 10.8%
-# - 10;5: 6.6%
-# 10;6 +: 57.6% false positives
-# so that approach produces good sensitivity, but very poor specificity.
-
-# 8.0 Using tetrachoric cors to identify item lists ####
-
-# In this case, the idea is to identify which items are most predictive of
-# whether a kid is likely to fall in the "sub20p" category.
-
-spa7tetrachoric = cor(spa7plus %>% select(all_of(itemCols)), spa7plus$sub20p) %>% data.frame %>% 
-  rename(cor = ".") %>% arrange(cor) %>% slice(1:20)
-
-## 8.1 by age ####
-spa7tetrachoric.age = by(spa7plus, INDICES=spa7plus$ageCat
-   , function(x) cor(x %>% select(all_of(itemCols)), x$sub20p) %>% data.frame %>% 
-     rename(cor = ".")# %>% arrange(cor)
-   , simplify = F) %>% 
-  lapply(FUN=as.data.frame) %>% bind_cols() 
-
-colnames(spa7tetrachoric.age) = paste0("cor", 7:11)
-
-### 8.1.1 age-based screeners ####
-
-spa7screeners=apply(
-  spa7tetrachoric.age, 2
+# get the item correlations
+spaItemCorsByAge = lapply(
+  spaItemTypes.qr.2
   , function(x) {
-    spa7plus %>% 
-      mutate(screener = rowSums(select(., all_of(names(x[order(x)])[1:20])))) %>% 
-      select(newID, screener, ageCat, sub20p)
-  }) %>% bind_cols() %>%
-  rename(newID = newID...1, sub20p=sub20p...4, ageCat = ageCat...3
-         , screener7 = screener...2, screener8 = screener...6
-         , screener9 = screener...10, screener10 = screener...14
-         , screener11 = screener...18) %>% 
-  select(newID, ageCat, sub20p, starts_with("screener")
-         , -starts_with("screener...")) %>% 
-  mutate(screener.age = 
-           case_when(ageCat == "<= 7;5"~screener7, ageCat=="<= 8;5"~screener8
-                     , ageCat=="<= 9;5"~screener9, ageCat=="<= 10;5"~screener10
-                     , ageCat=="10;6+"~screener11)
-         , screener.IRTflag = as.numeric(screener.age <= thrshHlds[as.numeric(ageCat)])
-  )
+    itms = x$itemCors
+    class(itms)="list"
+    itms %>% bind_cols()
+  }
+  ) %>% bind_rows()
 
-by(spa7screeners, INDICES=spa7screeners$ageCat
-   , FUN=function(x) cor(x$sub20p, x$screener.age))
+colnames(spaItemCorsByAge) = c(paste0("<= ", c("7;5", "8;5", "9;5", "10;5")), "10;6+")
 
-# Those aren't bad
+# get the items that are already on the scale.
+spaScreenerItemsByAge = spaScreenerItems %>% unlist(recursive = T, use.names = T)
+spaScreenerItemsByAge = data.frame(Item = spaScreenerItemsByAge
+           , label = names(spaScreenerItemsByAge)) %>% 
+  mutate(
+    Scale = gsub("\\..*", "", label)
+    , Age = ifelse(
+      gsub(".*\\.", "", label) == "<= 7;5"
+      , gsub(".*\\.", "", label)
+      , substr(gsub(".*\\.", "", label), 1, str_length(gsub(".*\\.", "", label))-1)
+    )
+  ) %>% select(-label)
 
-## 8.2 assess age-based screeners ####
 
-spa7detection.agescreeners = spa7screeners %>% 
-  group_by(ageCat, screener.age) %>% 
-  summarise(detection=sum(sub20p)) %>% #slice(1:20) %>% data.frame()
-  # ungroup(screener) %>% 
-  mutate(detection=cumsum(detection)/sum(detection)) %>% 
-  ungroup() %>% 
-  arrange(ageCat, screener.age)
+## Get the items that were in the original screener (ignoring Item type)
+addItems = vector("list", 5)
+names(addItems) = colnames(spaItemCorsByAge)
+for(age in names(addItems)) {
+  usedItems = spaScreenerItemsByAge %>% filter(Age==age) %>% select(Item) %>% unlist
+  addItems[[age]] = spaItemCorsByAge %>% select(age) %>% 
+    rename(Cor = 1) %>% 
+    mutate(Item = rownames(.), Scale = "Total", Age = age) %>% 
+    filter(!Item %in% usedItems) %>% 
+    arrange(Cor) %>% 
+    slice(1:10)
+}
+
+# Final screeners
+spaScreenerLong = rbind(
+  spaScreenerItemsByAge
+  , addItems %>% bind_rows %>% select(Item, Scale, Age)
+)
+
+### Check quality of the "Total" screeners
+for(age in names(addItems)){
+  spaAnalysis$longScreener.score[spaAnalysis$ageCat==age] = 
+    rowSums(
+      spaAnalysis[spaAnalysis$ageCat==age
+                  , spaScreenerLong$Item[spaScreenerLong$Age==age]]
+      )
+}
+
+table(spaAnalysis$longScreener.score, spaAnalysis$ageCat, spaAnalysis$sub20p)[,,2]
+# so for each subscale, we can apply a threshold as follows:
+# 7;5: 11/19 (10/80 false alarms, 12.5%)
+# 8;5: 13/17 (30/134 false alarms, 22.4%... oof... this is worse)
+# 9;5: 16/23 (6/120 false alarms, 5%)
+# 10;5: 23/26 (42/136 false alarms, 30.8%...oof.. this is worse)
+# 11;0: 21/28 (12/144 false alarms, 8.3%)
+
+### Take a closer look at the "added" items for 8;5 and 10;5
+
+addItems[c("<= 8;5", "<= 10;5")]
+
 
 ### 8.2.1 Detection ####
 ggplot(spa7detection.agescreeners, aes(x=screener.age, y=detection, col=ageCat))+
@@ -645,13 +295,13 @@ ggplot(spa7fpr.agescreener, aes(x=screener.age, y=fpr, col=ageCat))+
   theme(panel.grid.minor.x=element_blank())
 
 # This keeps false alarms under 25% for everyone. 
-# 7;5: 12.5%
+# 7;5: 12.5% (seems to have caught one kid.)
 # 8;5: 21.6%
 # 9;5: 11.7%
 # 10;5: 20.6%
 # 10;6+: 14.6%
 
-# Works much less well than the p16 version did.
+# Works much less well.
 
 ### 8.2.3 "Saved" assessments ####
 
