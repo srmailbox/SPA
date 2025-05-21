@@ -1,5 +1,7 @@
 ###############
-# SPA Project - SPA test item analysis
+# SPA Project - SPA test item analysis - Age Screeners ####
+# 
+# Final results here are just based on simple tetrachoric correlations by Age Group
 #
 # Created: 2024-10-07
 # Changelog:
