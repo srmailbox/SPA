@@ -122,10 +122,13 @@ spaYrItemTypes =
   lapply(spaYrItemTypes
          , function(x) list(
            data=x, 
-           itemCors=by(x, x$YEAR
-              , function(x) cor(x %>% select(2:30)
-                                , x %>% select(starts_with("sub20p"))
-              )
+           itemCors=by(
+             x, x$YEAR
+             , function(x) 
+               cor(x %>% select(2:30)
+                   , x %>% select(starts_with("sub20p"))
+               )
+             , simplify=F
            )
          )
   )
@@ -191,36 +194,55 @@ spaYrItemTypeFPRs = lapply(spaYrItemTypesScreeners
                     ggplot(aes(thresh, testLength, fill=FPR))+
                     geom_tile(na.rm=T)+
                     theme_minimal()+
-                    scale_y_continuous(breaks = 0:30)+
+                    scale_y_continuous(breaks = 1:29, labels = rownames(yr$itemFPR))+
                     scale_fill_binned(breaks = 0:5*20, na.value="grey90")
                 }
          )
 )
 
-par(mfrow=c(2,3))
-png(filename="FPRs.Irregs.png", width=960)
-spaYrItemTypeFPRs$Irregs$Yr1+ggtitle("Irregs Yr1")
-spaYrItemTypeFPRs$Irregs$Yr2+ggtitle("Irregs Yr2")
-spaYrItemTypeFPRs$Irregs$Yr3+ggtitle("Irregs Yr3")
-spaYrItemTypeFPRs$Irregs$Yr4+ggtitle("Irregs Yr4")
-spaYrItemTypeFPRs$Irregs$Yr5+ggtitle("Irregs Yr5")
-spaYrItemTypeFPRs$Irregs$Yr6+ggtitle("Irregs Yr6")
+include(gridExtra)
+png(filename="FPRs.Irregs.png", height=960, width=1920)
+grid.arrange(
+  spaYrItemTypeFPRs$Irregs$Yr1+ggtitle("Irregs Yr1")
+  ,spaYrItemTypeFPRs$Irregs$Yr2+ggtitle("Irregs Yr2")
+  ,spaYrItemTypeFPRs$Irregs$Yr3+ggtitle("Irregs Yr3")
+  ,spaYrItemTypeFPRs$Irregs$Yr4+ggtitle("Irregs Yr4")
+  ,spaYrItemTypeFPRs$Irregs$Yr5+ggtitle("Irregs Yr5")
+  ,spaYrItemTypeFPRs$Irregs$Yr6+ggtitle("Irregs Yr6")
+  , nrow=2)
 dev.off()
 
-png(filename="FPRs.Regs.png", width=960)
-spaYrItemTypeFPRs$Regs$Yr1+ggtitle("Regs Yr1")
-spaYrItemTypeFPRs$Regs$Yr2+ggtitle("Regs Yr2")
-spaYrItemTypeFPRs$Regs$Yr3+ggtitle("Regs Yr3")
-spaYrItemTypeFPRs$Regs$Yr4+ggtitle("Regs Yr4")
-spaYrItemTypeFPRs$Regs$Yr5+ggtitle("Regs Yr5")
-spaYrItemTypeFPRs$Regs$Yr6+ggtitle("Regs Yr6")
+png(filename="FPRs.Regs.png", height=960, width=1920)
+grid.arrange(
+  spaYrItemTypeFPRs$Regs$Yr1+ggtitle("Regs Yr1")
+,spaYrItemTypeFPRs$Regs$Yr2+ggtitle("Regs Yr2")
+,spaYrItemTypeFPRs$Regs$Yr3+ggtitle("Regs Yr3")
+,spaYrItemTypeFPRs$Regs$Yr4+ggtitle("Regs Yr4")
+,spaYrItemTypeFPRs$Regs$Yr5+ggtitle("Regs Yr5")
+,spaYrItemTypeFPRs$Regs$Yr6+ggtitle("Regs Yr6")
+,nrow=2)
 dev.off()
 
-png(filename="FPRs.NWs.png", width=960)
-spaYrItemTypeFPRs$NWs$Yr1+ggtitle("NWs Yr1")
-spaYrItemTypeFPRs$NWs$Yr2+ggtitle("NWs Yr2")
-spaYrItemTypeFPRs$NWs$Yr3+ggtitle("NWs Yr3")
-spaYrItemTypeFPRs$NWs$Yr4+ggtitle("NWs Yr4")
-spaYrItemTypeFPRs$NWs$Yr5+ggtitle("NWs Yr5")
-spaYrItemTypeFPRs$NWs$Yr6+ggtitle("NWs Yr6")
+png(filename="FPRs.NWs.png", height=960, width=1920)
+grid.arrange(
+  spaYrItemTypeFPRs$NWs$Yr1+ggtitle("NWs Yr1")
+,spaYrItemTypeFPRs$NWs$Yr2+ggtitle("NWs Yr2")
+,spaYrItemTypeFPRs$NWs$Yr3+ggtitle("NWs Yr3")
+,spaYrItemTypeFPRs$NWs$Yr4+ggtitle("NWs Yr4")
+,spaYrItemTypeFPRs$NWs$Yr5+ggtitle("NWs Yr5")
+,spaYrItemTypeFPRs$NWs$Yr6+ggtitle("NWs Yr6")
+,nrow=2)
 dev.off()
+
+
+## let's look at rankings by year ####
+# I don't love that items pop in and out of "importance" with this method. Treating
+# each grade as fully distinct allows for that in a way that using QR didn't as much
+# in the age-based version. e.g., it's odd to me that "nature" is one of the best
+# predictors for Yrs 4 and 6, but not even top 10 for year 5.
+
+lapply(spaYrItemTypes
+       , function (x) lapply(x$itemCors, function(y) y %>% data.frame) %>% bind_cols
+       )
+
+### 2.3.1 OK, let's set the scales ####
