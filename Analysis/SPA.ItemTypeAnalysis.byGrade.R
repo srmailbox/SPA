@@ -32,10 +32,7 @@
 # Changelog:
 
 # 0. Set up ####
-# include(CTT)
-# include(psych)
-# include(zoo)
-# include(quantreg)
+include(gridExtra)
 
 if(!exists("spaAcc")) source("Analysis/SPA.DataImport.R")
 
@@ -193,14 +190,19 @@ spaYrItemTypeFPRs = lapply(spaYrItemTypesScreeners
                     mutate(thresh = ordered(thresh, levels=paste0("l", 0:29))) %>% 
                     ggplot(aes(thresh, testLength, fill=FPR))+
                     geom_tile(na.rm=T)+
+                    geom_text(aes(label=round(FPR,0)), size=2.5, color="white")+
                     theme_minimal()+
-                    scale_y_continuous(breaks = 1:29, labels = rownames(yr$itemFPR))+
-                    scale_fill_binned(breaks = 0:5*20, na.value="grey90")
+                    scale_y_continuous(
+                      name="Items", breaks = 1:29, labels = rownames(yr$itemFPR)
+                      )+
+                    scale_fill_binned(
+                      breaks = c(0,5,10,15,20,100), na.value="grey90"
+                      , transform="pseudo_log"
+                      )
                 }
          )
 )
 
-include(gridExtra)
 png(filename="FPRs.Irregs.png", height=960, width=1920)
 grid.arrange(
   spaYrItemTypeFPRs$Irregs$Yr1+ggtitle("Irregs Yr1")
@@ -245,4 +247,171 @@ lapply(spaYrItemTypes
        , function (x) lapply(x$itemCors, function(y) y %>% data.frame) %>% bind_cols
        )
 
+# OK, welp, this is just kind of the reality, I guess. It's either accept this
+# or make highly subjective changes guided by the feeling that items should
+# behave well.
+
 ### 2.3.1 OK, let's set the scales ####
+# Irregs:
+# Yr1: No Options - Irregs are at the floor.
+# Yr2: 5 items, threshold 2 (e.g., must score higher than 2)
+#   said, come, was, have, other (4% FPR)
+# Yr3: deadly young dairy please other people search country shoulder (station)
+#   9 (10) items, threshold 3 (must score 4 or better - FPR 5% (4%))
+# Yr4: search nature dairy young remember country other flavour fortune station
+#   10 items, threshold 6 (must score 7 - FPR 13%)
+#   (could add people then please, increasing threshold by 1 and then 1 more)
+#   15 items (people please deadly aspire shoulder) would give 7% FPR (9 thresh)
+# Yr5: need a lot - 14 (16) items
+#   search country remember flavour science station please shoulder fortune 
+#   language young deadly nature neighbour (dairy wheat)
+#   thresh 10 (11) FPR 15% (12%)
+# Yr6: fortune nature search country shoulder neighbour (aspire young dairy)
+#   6 (9) items with threshold 4 (6) gets FPR 8% (6%)
+
+# Regs:
+# Yr1: 5 items (best cup clip stem grand) with a threshold of 1 gets 2% FPR
+# Yr2: grand strong best clip fond life - 6 items, thresh 3, fpr 3%
+# Yr3: understand sporty blade subside shelf ground prize yesterday selfishly scarper
+#   10 items, threshold 5, fpr 10%
+# Yr4: strong sporty blade shelf understand clip cup best
+#   8 items threshold 6 fpr 3%
+# Yr5: check subside property selfishly prize yesterday scarper demonstrate 
+#   shelf judgement impact trombone swept scram
+#   14 items, thresh 9, fpr 10%
+# Yr6: property impact judgement subside blade demonstrate lantern selfishly
+#   8 items, thresh 5, fpr 8%
+
+# NWs:
+# Yr1: swem clep lep prond scrand - 5 items, thresh 1, fpr 0%
+# Yr2: prond swem greem chust linst = 5 items, thresh 2, fpr 3%
+# Yr3:  chust scade swem underbably jubside bife strofect trelfishly clep fize 
+#       lorty scrand withound prostand
+#   items 14, thresh 6, fpr 12%
+# Yr4:  clep swem chust shilf greem lep scade prond strofect prostand jubside 
+#       bife lorty spantern scrand
+#   items 15, thresh 8, fpr 6% (thresh 9, 15%)
+# Yr5:  scade shilf trelfishly strofect prostand greem impabit sandstrate 
+#       sombone lorty fize withound prond lirst
+#   14 items thresh 9 fpr 9%
+# Yr 6: underbably strofect sandstrate jubside shilf lorty greem prostand scade 
+#       grong chust bife (sombone blarper spantern)
+#   12 items (15), thresh 9 (10), fpr 15% (12%)
+
+
+### Set up the rules
+scrnrStruct = 
+data.frame(
+  Type = gl(3, 6, labels=c("Irreg", "Regs", "NWs"))
+  , Year = paste0("Yr", 1:6)
+  , nItems = c(0,5,11,10,14,6
+               ,5,6,10,8,14,8
+               ,5,5,14,15,14,12)
+  , thrshhld = c(NA,2,3,6,10,4
+                 , 1,3,5,6,9,5
+                 , 1,2,6,8,9,9)
+)
+
+scrnrItems = lapply(
+  spaYrItemTypes
+  , function(typ) 
+    lapply(
+      typ$itemCors
+      , function(yr) rownames(yr)[order(yr)]
+    ) %>% bind_cols
+)
+
+scrnrStructList = vector("list", nrow(scrnrStruct))
+for (i in 1:nrow(scrnrStruct)) {
+  if(scrnrStruct$nItems[i]) {
+    Type = scrnrStruct$Type[i]
+    Year = scrnrStruct$Year[i]
+    nItems = scrnrStruct$nItems[i]
+    Threshhold = scrnrStruct$thrshhld[i]
+    scrnrStructList[[i]] = 
+      list(Type = Type, Year = Year
+           , nItems = nItems, Threshhold=Threshhold
+           , items = unlist(scrnrItems[[Type]][1:nItems, Year]))
+  }
+}
+
+scrnrScores = lapply(
+  scrnrStructList
+  , function(x) {
+    if(is.null(x)) return(x)
+    varName = paste0("scrnr20p.",x$Type)
+    dat = spaYrAnalysis %>% 
+      filter(YEAR==x$Year) %>% 
+      select(newID, all_of(x$items)) %>% 
+      mutate(subscale = ifelse(rowSums(pick(-newID))<=x$Threshhold, 1,0))
+    colnames(dat)[ncol(dat)]=varName
+    list(Year = x$Year, scrnr = dat %>% select(newID, ncol(dat)))
+  }
+)
+
+scrnrScoresYr6 = 
+  lapply(scrnrScores
+         , function (x) if (!is.null(x) && x$Year=="Yr6") x$scrnr else NULL
+         ) %>% bind_cols
+
+scrnrScoresYr5 = 
+  lapply(scrnrScores
+         , function (x) if (!is.null(x) && x$Year=="Yr5") x$scrnr else NULL
+  ) %>% bind_cols
+
+scrnrScoresYr4 = 
+  lapply(scrnrScores
+         , function (x) if (!is.null(x) && x$Year=="Yr4") x$scrnr else NULL
+  ) %>% bind_cols
+
+scrnrScoresYr3 = 
+  lapply(scrnrScores
+         , function (x) if (!is.null(x) && x$Year=="Yr3") x$scrnr else NULL
+  ) %>% bind_cols
+
+scrnrScoresYr2 = 
+  lapply(scrnrScores
+         , function (x) if (!is.null(x) && x$Year=="Yr2") x$scrnr else NULL
+  ) %>% bind_cols
+
+scrnrScoresYr1 = 
+  lapply(scrnrScores
+         , function (x) if (!is.null(x) && x$Year=="Yr1") x$scrnr else NULL
+  ) %>% bind_cols %>% mutate(scrnr20p.Irreg = NA)
+
+scrnrScoresAll = 
+  rbind(
+    scrnrScoresYr1 %>% select(newID...1, starts_with("scrnr")) %>% 
+      rename(newID = newID...1)
+    , scrnrScoresYr2 %>% select(newID...1, starts_with("scrnr")) %>% 
+      rename(newID = newID...1)
+    , scrnrScoresYr3 %>% select(newID...1, starts_with("scrnr")) %>% 
+      rename(newID = newID...1)
+    , scrnrScoresYr4 %>% select(newID...1, starts_with("scrnr")) %>% 
+      rename(newID = newID...1)
+    , scrnrScoresYr5 %>% select(newID...1, starts_with("scrnr")) %>% 
+      rename(newID = newID...1)
+    , scrnrScoresYr6 %>% select(newID...1, starts_with("scrnr")) %>% 
+      rename(newID = newID...1)
+  )
+
+detectionFPRCheck = 
+  merge(
+    spaYrAnalysis %>% select(newID, YEAR, starts_with("sub20p"))
+    , scrnrScoresAll
+  ) %>% 
+  mutate(
+    anySub20p = rowSums(pick(starts_with("sub20p")), na.rm=T)>0
+    , anyScrnr20p = rowSums(pick(starts_with("scrnr")), na.rm=T)>0
+  )
+
+
+Contingencies = by(detectionFPRCheck, detectionFPRCheck$YEAR
+   , function(x) 
+     list(
+       Irregs = table(x$sub20p_irr, x$scrnr20p.Irreg)
+       , Regs = table(x$sub20p_reg, x$scrnr20p.Regs)
+       , NWs = table(x$sub20p_nws, x$scrnr20p.NWs)
+       , All = table(x$anySub20p, x$anyScrnr20p)
+       )
+   )
